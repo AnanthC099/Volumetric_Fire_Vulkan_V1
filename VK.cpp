@@ -421,7 +421,7 @@ static void LogFireParameters(const char* context)
 {
         const char* label = (context != NULL) ? context : "FireParameters";
 
-        FileIO("%s: slices=%u radius=%.2f height=%.2f scale=(%.2f, %.2f, %.2f) scroll=%.2f turbulence=%.2f timeSpeed=%.2f\n",
+        FileIO("%s: slices=%u radius=%.2f height=%.2f scale=(%.2f, %.2f, %.2f) scroll=%.2f turbulence=%.2f timeSpeed=%.2f time=%.2f\n",
                 label,
                 fireSliceCount,
                 fireRadius,
@@ -431,7 +431,8 @@ static void LogFireParameters(const char* context)
                 fireScaleZ,
                 fireScrollSpeed,
                 fireTurbulence,
-                fireTimeSpeed);
+                fireTimeSpeed,
+                fireTime);
 }
 
 static float ClampFloat(float value, float minValue, float maxValue)
@@ -884,6 +885,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT iMsg, WPARAM wParam, LPARAM lParam)
 
                         case '0':
                                 ResetFireParameters();
+                                break;
+
+                        case 'L':
+                        case 'l':
+                                LogFireParameters("WndProc(): KeyPress");
                                 break;
 
                         case 'F':

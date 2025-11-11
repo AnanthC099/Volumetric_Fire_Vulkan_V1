@@ -3,10 +3,8 @@
 #include <windows.h>
 #include <math.h>
 #include <stdarg.h>
-#include <vector>
-#include <array>
-#include <queue>
-#include <algorithm>
+#include <string.h>
+#include <float.h>
 
 //Header file for texture
 #define STB_IMAGE_IMPLEMENTATION
@@ -41,6 +39,9 @@ void DestroyFireVertexBuffers(void);
 void ResetFireParameters(void);
 VkResult buildCommandBuffers(void);
 VkResult CreateVertexBuffer(void);
+bool LoadFireShapeOffsetsFromImage(const char* imagePath, int gridResolution, unsigned char alphaThreshold);
+
+static size_t GetFireEmitterCount(void);
 
 const char* gpszAppName = "ARTR";
 
@@ -383,6 +384,10 @@ const float FIRE_TIME_SPEED_STEP = 0.02f;
 const float FIRE_BASE_DELTA_TIME = 0.016f;
 const float FIRE_TIME_WRAP = 1000.0f;
 
+const int FIRE_SHAPE_GRID_RESOLUTION = 21;
+const unsigned char FIRE_SHAPE_ALPHA_THRESHOLD = 200;
+const float FIRE_SHAPE_SPACING_MULTIPLIER = 1.6f;
+
 float fireTime = 0.0f;
 uint32_t fireSliceCount = FIRE_DEFAULT_SLICE_COUNT;
 float fireRadius = FIRE_DEFAULT_RADIUS;
@@ -396,8 +401,13 @@ float fireTimeSpeed = FIRE_DEFAULT_TIME_SPEED;
 uint32_t fireSliceCapacity = 0;
 uint32_t recordedFireVertexCount = 0;
 glm::vec3 gCameraPosition = glm::vec3(0.0f, 0.5f, 5.0f);
-std::vector<glm::vec3> fireSlicePositions;
-std::vector<glm::vec3> fireSliceLocalCoords;
+glm::vec2* gFireShapeOffsets = NULL;
+size_t gFireShapeOffsetCount = 0;
+size_t gFireShapeOffsetCapacity = 0;
+glm::vec3* gFireSlicePositions = NULL;
+glm::vec3* gFireSliceLocalCoords = NULL;
+size_t gFireSliceVertexCountCPU = 0;
+size_t gFireSliceArrayCapacity = 0;
 uint32_t fireVertexCount = 0;
 
 //Texture related data
@@ -417,6 +427,540 @@ void FileIO(const char* format, ...)
         }
 }
 
+static void FreeFireShapeOffsets(void)
+{
+        if (gFireShapeOffsets)
+        {
+                free(gFireShapeOffsets);
+                gFireShapeOffsets = NULL;
+        }
+        gFireShapeOffsetCount = 0;
+        gFireShapeOffsetCapacity = 0;
+}
+
+static bool EnsureFireShapeOffsetCapacity(size_t capacity)
+{
+        if (capacity <= gFireShapeOffsetCapacity)
+        {
+                return true;
+        }
+
+        glm::vec2* newOffsets = (glm::vec2*)malloc(sizeof(glm::vec2) * capacity);
+        if (newOffsets == NULL)
+        {
+                return false;
+        }
+
+        if (gFireShapeOffsets && gFireShapeOffsetCount > 0)
+        {
+                size_t copyCount = gFireShapeOffsetCount;
+                if (copyCount > capacity)
+                {
+                        copyCount = capacity;
+                }
+                memcpy(newOffsets, gFireShapeOffsets, sizeof(glm::vec2) * copyCount);
+        }
+
+        if (gFireShapeOffsets)
+        {
+                free(gFireShapeOffsets);
+        }
+
+        gFireShapeOffsets = newOffsets;
+        gFireShapeOffsetCapacity = capacity;
+        return true;
+}
+
+static void FreeFireSliceStorage(void)
+{
+        if (gFireSlicePositions)
+        {
+                free(gFireSlicePositions);
+                gFireSlicePositions = NULL;
+        }
+        if (gFireSliceLocalCoords)
+        {
+                free(gFireSliceLocalCoords);
+                gFireSliceLocalCoords = NULL;
+        }
+        gFireSliceVertexCountCPU = 0;
+        gFireSliceArrayCapacity = 0;
+}
+
+static bool EnsureFireSliceCapacity(size_t capacity)
+{
+        if (capacity <= gFireSliceArrayCapacity)
+        {
+                return true;
+        }
+
+        glm::vec3* newPositions = (glm::vec3*)malloc(sizeof(glm::vec3) * capacity);
+        glm::vec3* newLocals = (glm::vec3*)malloc(sizeof(glm::vec3) * capacity);
+        if (newPositions == NULL || newLocals == NULL)
+        {
+                if (newPositions)
+                {
+                        free(newPositions);
+                }
+                if (newLocals)
+                {
+                        free(newLocals);
+                }
+                return false;
+        }
+
+        if (gFireSlicePositions && gFireSliceVertexCountCPU > 0)
+        {
+                size_t copyCount = gFireSliceVertexCountCPU;
+                if (copyCount > gFireSliceArrayCapacity)
+                {
+                        copyCount = gFireSliceArrayCapacity;
+                }
+                memcpy(newPositions, gFireSlicePositions, sizeof(glm::vec3) * copyCount);
+                memcpy(newLocals, gFireSliceLocalCoords, sizeof(glm::vec3) * copyCount);
+        }
+
+        if (gFireSlicePositions)
+        {
+                free(gFireSlicePositions);
+        }
+        if (gFireSliceLocalCoords)
+        {
+                free(gFireSliceLocalCoords);
+        }
+
+        gFireSlicePositions = newPositions;
+        gFireSliceLocalCoords = newLocals;
+        gFireSliceArrayCapacity = capacity;
+        return true;
+}
+
+static bool AppendFireTriangle(const glm::vec3 positions[3], const glm::vec3 locals[3])
+{
+        size_t required = gFireSliceVertexCountCPU + 3;
+        if (!EnsureFireSliceCapacity(required))
+        {
+                return false;
+        }
+
+        gFireSlicePositions[gFireSliceVertexCountCPU + 0] = positions[0];
+        gFireSliceLocalCoords[gFireSliceVertexCountCPU + 0] = locals[0];
+        gFireSlicePositions[gFireSliceVertexCountCPU + 1] = positions[1];
+        gFireSliceLocalCoords[gFireSliceVertexCountCPU + 1] = locals[1];
+        gFireSlicePositions[gFireSliceVertexCountCPU + 2] = positions[2];
+        gFireSliceLocalCoords[gFireSliceVertexCountCPU + 2] = locals[2];
+        gFireSliceVertexCountCPU += 3;
+        return true;
+}
+
+typedef struct FireEdgeExpiration
+{
+        float priority;
+        int index;
+} FireEdgeExpiration;
+
+typedef struct FireEdgeQueue
+{
+        FireEdgeExpiration entries[16];
+        int count;
+} FireEdgeQueue;
+
+typedef struct FireActiveEdge
+{
+        int expired;
+        int startIndex;
+        int endIndex;
+        glm::vec3 deltaPos;
+        glm::vec3 deltaTex;
+        glm::vec3 pos;
+        glm::vec3 tex;
+        int prev;
+        int next;
+} FireActiveEdge;
+
+static void FireQueueInit(FireEdgeQueue* queue)
+{
+        if (queue)
+        {
+                queue->count = 0;
+        }
+}
+
+static void FireQueuePush(FireEdgeQueue* queue, float priority, int index)
+{
+        if (queue == NULL)
+        {
+                return;
+        }
+
+        if (queue->count >= (int)(sizeof(queue->entries) / sizeof(queue->entries[0])))
+        {
+                return;
+        }
+
+        queue->entries[queue->count].priority = priority;
+        queue->entries[queue->count].index = index;
+        queue->count += 1;
+}
+
+static int FireQueuePopGE(FireEdgeQueue* queue, float threshold, FireEdgeExpiration* out)
+{
+        if (queue == NULL || queue->count == 0)
+        {
+                return 0;
+        }
+
+        int bestIndex = -1;
+        float bestPriority = -FLT_MAX;
+        for (int i = 0; i < queue->count; ++i)
+        {
+                if (queue->entries[i].priority > bestPriority)
+                {
+                        bestPriority = queue->entries[i].priority;
+                        bestIndex = i;
+                }
+        }
+
+        if (bestIndex < 0 || bestPriority < threshold)
+        {
+                return 0;
+        }
+
+        if (out)
+        {
+                *out = queue->entries[bestIndex];
+        }
+
+        queue->entries[bestIndex] = queue->entries[queue->count - 1];
+        queue->count -= 1;
+        return 1;
+}
+
+static int FireCreateEdge(int startIndex,
+        int endIndex,
+        FireActiveEdge* activeEdges,
+        int maxEdges,
+        int* nextEdgeIndex,
+        const glm::vec3 posCorners[8],
+        const glm::vec3 texCorners[8],
+        const float cornerDistance[8],
+        float sliceDistance,
+        float sliceSpacing,
+        FireEdgeQueue* expirations)
+{
+        if (endIndex < 0 || activeEdges == NULL || nextEdgeIndex == NULL || *nextEdgeIndex >= maxEdges)
+        {
+                return -1;
+        }
+
+        FireActiveEdge* activeEdge = &activeEdges[*nextEdgeIndex];
+        activeEdge->expired = 0;
+        activeEdge->startIndex = startIndex;
+        activeEdge->endIndex = endIndex;
+        activeEdge->prev = -1;
+        activeEdge->next = -1;
+        activeEdge->deltaPos = glm::vec3(0.0f);
+        activeEdge->deltaTex = glm::vec3(0.0f);
+        activeEdge->pos = posCorners[startIndex];
+        activeEdge->tex = texCorners[startIndex];
+
+        float range = cornerDistance[startIndex] - cornerDistance[endIndex];
+        if (fabsf(range) > 1.0e-6f)
+        {
+                float invRange = 1.0f / range;
+                activeEdge->deltaPos = (posCorners[endIndex] - posCorners[startIndex]) * invRange;
+                activeEdge->deltaTex = (texCorners[endIndex] - texCorners[startIndex]) * invRange;
+                float step = cornerDistance[startIndex] - sliceDistance;
+                activeEdge->pos = posCorners[startIndex] + activeEdge->deltaPos * step;
+                activeEdge->tex = texCorners[startIndex] + activeEdge->deltaTex * step;
+                activeEdge->deltaPos *= sliceSpacing;
+                activeEdge->deltaTex *= sliceSpacing;
+        }
+
+        int createdIndex = *nextEdgeIndex;
+        *nextEdgeIndex += 1;
+
+        FireQueuePush(expirations, cornerDistance[endIndex], createdIndex);
+        return createdIndex;
+}
+
+static void AppendEmitterSlicesForOffset(const glm::vec3& emitterOffset, const glm::vec3 texCorners[8])
+{
+        const float widthHalf = fireRadius;
+        const float depthHalf = fireRadius;
+        const float heightHalf = fireHeight * 0.5f;
+
+        glm::vec3 posCorners[8];
+        posCorners[0] = emitterOffset + glm::vec3(-widthHalf, -heightHalf, -depthHalf);
+        posCorners[1] = emitterOffset + glm::vec3( widthHalf, -heightHalf, -depthHalf);
+        posCorners[2] = emitterOffset + glm::vec3(-widthHalf,  heightHalf, -depthHalf);
+        posCorners[3] = emitterOffset + glm::vec3( widthHalf,  heightHalf, -depthHalf);
+        posCorners[4] = emitterOffset + glm::vec3(-widthHalf, -heightHalf,  depthHalf);
+        posCorners[5] = emitterOffset + glm::vec3( widthHalf, -heightHalf,  depthHalf);
+        posCorners[6] = emitterOffset + glm::vec3(-widthHalf,  heightHalf,  depthHalf);
+        posCorners[7] = emitterOffset + glm::vec3( widthHalf,  heightHalf,  depthHalf);
+
+        glm::vec3 fireFocus = emitterOffset + glm::vec3(0.0f, fireHeight * 0.5f, 0.0f);
+        glm::vec3 viewVector = gCameraPosition - fireFocus;
+        if (glm::length(viewVector) < 0.0001f)
+        {
+                viewVector = glm::vec3(0.0f, 0.0f, 1.0f);
+        }
+        viewVector = glm::normalize(viewVector);
+
+        float cornerDistance[8];
+        cornerDistance[0] = glm::dot(posCorners[0], viewVector);
+        float minDistance = cornerDistance[0];
+        float maxDistance = cornerDistance[0];
+        int maxCorner = 0;
+
+        for (int i = 1; i < 8; ++i)
+        {
+                cornerDistance[i] = glm::dot(posCorners[i], viewVector);
+                if (cornerDistance[i] > maxDistance)
+                {
+                        maxDistance = cornerDistance[i];
+                        maxCorner = i;
+                }
+                if (cornerDistance[i] < minDistance)
+                {
+                        minDistance = cornerDistance[i];
+                }
+        }
+
+        float distanceRange = maxDistance - minDistance;
+        if (distanceRange <= 0.0f)
+        {
+                return;
+        }
+
+        if (fireSliceCount == 0)
+        {
+                return;
+        }
+
+        float sliceSpacing = distanceRange / static_cast<float>(fireSliceCount);
+        if (sliceSpacing <= 0.0f)
+        {
+                return;
+        }
+
+        float sliceDistance = floorf(maxDistance / sliceSpacing) * sliceSpacing;
+
+        const int MAX_EDGES = 12;
+        FireActiveEdge activeEdges[MAX_EDGES];
+        int nextEdgeIndex = 0;
+        FireEdgeQueue expirations;
+        FireQueueInit(&expirations);
+
+        static const int cornerNeighbors[8][3] = {
+                { 1, 2, 4 },
+                { 0, 5, 3 },
+                { 0, 3, 6 },
+                { 1, 7, 2 },
+                { 0, 6, 5 },
+                { 1, 4, 7 },
+                { 2, 7, 4 },
+                { 3, 5, 6 }
+        };
+
+        static const int incomingEdges[8][8] = {
+                { -1,  2,  4, -1,  1, -1, -1, -1 },
+                {  5, -1, -1,  0, -1,  3, -1, -1 },
+                {  3, -1, -1,  6, -1, -1,  0, -1 },
+                { -1,  7,  1, -1, -1, -1, -1,  2 },
+                {  6, -1, -1, -1, -1,  0,  5, -1 },
+                { -1,  4, -1, -1,  7, -1, -1,  1 },
+                { -1, -1,  7, -1,  2, -1, -1,  4 },
+                { -1, -1, -1,  5, -1,  6,  3, -1 }
+        };
+
+        for (int i = 0; i < 3; ++i)
+        {
+                int edgeIndex = FireCreateEdge(maxCorner,
+                        cornerNeighbors[maxCorner][i],
+                        activeEdges,
+                        MAX_EDGES,
+                        &nextEdgeIndex,
+                        posCorners,
+                        texCorners,
+                        cornerDistance,
+                        sliceDistance,
+                        sliceSpacing,
+                        &expirations);
+                if (edgeIndex >= 0)
+                {
+                        activeEdges[edgeIndex].prev = (i + 2) % 3;
+                        activeEdges[edgeIndex].next = (i + 1) % 3;
+                }
+        }
+
+        int firstEdge = 0;
+
+        while (sliceDistance > minDistance)
+        {
+                FireEdgeExpiration expiration;
+                while (FireQueuePopGE(&expirations, sliceDistance, &expiration))
+                {
+                        if (expiration.index < 0 || expiration.index >= nextEdgeIndex)
+                        {
+                                continue;
+                        }
+
+                        FireActiveEdge* edge = &activeEdges[expiration.index];
+                        if (edge->expired)
+                        {
+                                continue;
+                        }
+
+                        FireActiveEdge* prevEdge = &activeEdges[edge->prev];
+                        FireActiveEdge* nextEdgeRef = &activeEdges[edge->next];
+
+                        if (edge->endIndex != prevEdge->endIndex && edge->endIndex != nextEdgeRef->endIndex)
+                        {
+                                edge->expired = 1;
+
+                                int edge1 = FireCreateEdge(edge->endIndex,
+                                        incomingEdges[edge->endIndex][edge->startIndex],
+                                        activeEdges,
+                                        MAX_EDGES,
+                                        &nextEdgeIndex,
+                                        posCorners,
+                                        texCorners,
+                                        cornerDistance,
+                                        sliceDistance,
+                                        sliceSpacing,
+                                        &expirations);
+                                if (edge1 < 0)
+                                {
+                                        continue;
+                                }
+                                activeEdges[edge1].prev = edge->prev;
+                                activeEdges[edge->prev].next = edge1;
+
+                                int edge2 = FireCreateEdge(edge->endIndex,
+                                        incomingEdges[edge->endIndex][activeEdges[edge1].endIndex],
+                                        activeEdges,
+                                        MAX_EDGES,
+                                        &nextEdgeIndex,
+                                        posCorners,
+                                        texCorners,
+                                        cornerDistance,
+                                        sliceDistance,
+                                        sliceSpacing,
+                                        &expirations);
+                                if (edge2 < 0)
+                                {
+                                        continue;
+                                }
+
+                                activeEdges[edge1].next = edge2;
+                                activeEdges[edge2].prev = edge1;
+                                activeEdges[edge2].next = edge->next;
+                                activeEdges[edge->next].prev = edge2;
+                                firstEdge = edge1;
+                        }
+                        else
+                        {
+                                FireActiveEdge* prevPtr = NULL;
+                                FireActiveEdge* nextPtr = NULL;
+
+                                if (edge->endIndex == prevEdge->endIndex)
+                                {
+                                        prevPtr = prevEdge;
+                                        nextPtr = edge;
+                                }
+                                else
+                                {
+                                        prevPtr = edge;
+                                        nextPtr = nextEdgeRef;
+                                }
+
+                                if (prevPtr == NULL || nextPtr == NULL)
+                                {
+                                        continue;
+                                }
+
+                                prevPtr->expired = 1;
+                                nextPtr->expired = 1;
+
+                                int merged = FireCreateEdge(edge->endIndex,
+                                        incomingEdges[edge->endIndex][prevPtr->startIndex],
+                                        activeEdges,
+                                        MAX_EDGES,
+                                        &nextEdgeIndex,
+                                        posCorners,
+                                        texCorners,
+                                        cornerDistance,
+                                        sliceDistance,
+                                        sliceSpacing,
+                                        &expirations);
+                                if (merged < 0)
+                                {
+                                        continue;
+                                }
+
+                                activeEdges[merged].prev = prevPtr->prev;
+                                activeEdges[prevPtr->prev].next = merged;
+                                activeEdges[merged].next = nextPtr->next;
+                                activeEdges[nextPtr->next].prev = merged;
+                                firstEdge = merged;
+                        }
+                }
+
+                glm::vec3 polygonPositions[MAX_EDGES];
+                glm::vec3 polygonTexCoords[MAX_EDGES];
+                int polygonCount = 0;
+
+                int current = firstEdge;
+                int guard = 0;
+
+                do
+                {
+                        FireActiveEdge* activeEdge = &activeEdges[current];
+                        polygonPositions[polygonCount] = activeEdge->pos;
+                        polygonTexCoords[polygonCount] = activeEdge->tex;
+                        activeEdge->pos += activeEdge->deltaPos;
+                        activeEdge->tex += activeEdge->deltaTex;
+                        current = activeEdge->next;
+                        polygonCount += 1;
+                        guard += 1;
+                } while (current != firstEdge && polygonCount < MAX_EDGES && guard < MAX_EDGES * 2);
+
+                if (polygonCount >= 3)
+                {
+                        for (int i = 2; i < polygonCount; ++i)
+                        {
+                                glm::vec3 triPos[3];
+                                glm::vec3 triTex[3];
+                                triPos[0] = polygonPositions[0];
+                                triPos[1] = polygonPositions[i - 1];
+                                triPos[2] = polygonPositions[i];
+                                triTex[0] = polygonTexCoords[0];
+                                triTex[1] = polygonTexCoords[i - 1];
+                                triTex[2] = polygonTexCoords[i];
+
+                                if (!AppendFireTriangle(triPos, triTex))
+                                {
+                                        return;
+                                }
+                        }
+                }
+
+                sliceDistance -= sliceSpacing;
+        }
+}
+
+static size_t GetFireEmitterCount(void)
+{
+        if (gFireShapeOffsetCount == 0)
+        {
+                return (size_t)1;
+        }
+
+        return gFireShapeOffsetCount;
+}
+
 static void LogFireParameters(const char* context)
 {
         const char* label = (context != NULL) ? context : "FireParameters";
@@ -433,6 +977,126 @@ static void LogFireParameters(const char* context)
                 fireTurbulence,
                 fireTimeSpeed,
                 fireTime);
+}
+
+bool LoadFireShapeOffsetsFromImage(const char* imagePath, int gridResolution, unsigned char alphaThreshold)
+{
+        if (gridResolution <= 0)
+        {
+                gFireShapeOffsetCount = 0;
+                return false;
+        }
+
+        int width = 0;
+        int height = 0;
+        int channels = 0;
+        unsigned char* data = stbi_load(imagePath, &width, &height, &channels, 4);
+        if (!data)
+        {
+                FileIO("LoadFireShapeOffsetsFromImage(): failed to load %s\n", imagePath);
+                return false;
+        }
+
+        size_t maxOffsets = (size_t)gridResolution * (size_t)gridResolution;
+        if (!EnsureFireShapeOffsetCapacity(maxOffsets))
+        {
+                stbi_image_free(data);
+                FileIO("LoadFireShapeOffsetsFromImage(): memory allocation failed for %s\n", imagePath);
+                gFireShapeOffsetCount = 0;
+                return false;
+        }
+
+        size_t offsetCount = 0;
+
+        for (int gy = 0; gy < gridResolution; ++gy)
+        {
+                for (int gx = 0; gx < gridResolution; ++gx)
+                {
+                        int x0 = gx * width / gridResolution;
+                        int x1 = (gx + 1) * width / gridResolution;
+                        int y0 = gy * height / gridResolution;
+                        int y1 = (gy + 1) * height / gridResolution;
+
+                        unsigned int alphaSum = 0;
+                        unsigned int sampleCount = 0;
+
+                        for (int y = y0; y < y1; ++y)
+                        {
+                                for (int x = x0; x < x1; ++x)
+                                {
+                                        alphaSum += data[(y * width + x) * 4 + 3];
+                                        ++sampleCount;
+                                }
+                        }
+
+                        if (sampleCount == 0)
+                        {
+                                continue;
+                        }
+
+                        unsigned char averageAlpha = static_cast<unsigned char>(alphaSum / sampleCount);
+                        if (averageAlpha < alphaThreshold)
+                        {
+                                continue;
+                        }
+
+                        float u = (static_cast<float>(gx) + 0.5f) / static_cast<float>(gridResolution);
+                        float v = (static_cast<float>(gy) + 0.5f) / static_cast<float>(gridResolution);
+                        float xNorm = u * 2.0f - 1.0f;
+                        float zNorm = (1.0f - v) * 2.0f - 1.0f;
+                        if (offsetCount < gFireShapeOffsetCapacity)
+                        {
+                                gFireShapeOffsets[offsetCount] = glm::vec2(xNorm, zNorm);
+                                ++offsetCount;
+                        }
+                }
+        }
+
+        stbi_image_free(data);
+
+        if (offsetCount == 0)
+        {
+                FileIO("LoadFireShapeOffsetsFromImage(): no emitters detected in %s\n", imagePath);
+                gFireShapeOffsetCount = 0;
+                return false;
+        }
+
+        glm::vec2 centroid(0.0f);
+        size_t i = 0;
+        for (i = 0; i < offsetCount; ++i)
+        {
+                centroid += gFireShapeOffsets[i];
+        }
+        centroid /= static_cast<float>(offsetCount);
+
+        float maxAbsComponent = 0.0f;
+        for (i = 0; i < offsetCount; ++i)
+        {
+                gFireShapeOffsets[i] -= centroid;
+                float absX = fabsf(gFireShapeOffsets[i].x);
+                float absY = fabsf(gFireShapeOffsets[i].y);
+                if (absX > maxAbsComponent)
+                {
+                        maxAbsComponent = absX;
+                }
+                if (absY > maxAbsComponent)
+                {
+                        maxAbsComponent = absY;
+                }
+        }
+
+        if (maxAbsComponent > 0.0f)
+        {
+                float invMax = 1.0f / maxAbsComponent;
+                for (i = 0; i < offsetCount; ++i)
+                {
+                        gFireShapeOffsets[i] *= invMax;
+                }
+        }
+
+        gFireShapeOffsetCount = offsetCount;
+        FileIO("LoadFireShapeOffsetsFromImage(): %zu emitters from %s\n", gFireShapeOffsetCount, imagePath);
+        return true;
 }
 
 static float ClampFloat(float value, float minValue, float maxValue)
@@ -1136,15 +1800,20 @@ VkResult CreateTextureResource(const char*, TextureResource*, const char*);
 		fprintf(gFILE, "initialize(): CreateCommandBuffers() succedded\n");
 	}
 	
-	/*
-	22.2. Declare User defined function CreateVertexBuffer().
-	Write its prototype below CreateCommandBuffers() and above CreateRenderPass() and also call it between the calls of these two.
-	*/
-	vkResult  = CreateVertexBuffer();
-	if (vkResult != VK_SUCCESS)
-	{
-		fprintf(gFILE, "initialize(): CreateVertexBuffer() function failed with error code %d\n", vkResult);
-		return vkResult;
+        if (!LoadFireShapeOffsetsFromImage("Swastika_Transparent.png", FIRE_SHAPE_GRID_RESOLUTION, FIRE_SHAPE_ALPHA_THRESHOLD))
+        {
+                FileIO("initialize(): using default cylindrical fire layout\n");
+        }
+
+        /*
+        22.2. Declare User defined function CreateVertexBuffer().
+        Write its prototype below CreateCommandBuffers() and above CreateRenderPass() and also call it between the calls of these two.
+        */
+        vkResult  = CreateVertexBuffer();
+        if (vkResult != VK_SUCCESS)
+        {
+                fprintf(gFILE, "initialize(): CreateVertexBuffer() function failed with error code %d\n", vkResult);
+                return vkResult;
 	}
 	else
 	{
@@ -2212,6 +2881,9 @@ void uninitialize(void)
 				vertexdata_position.vkBuffer = VK_NULL_HANDLE;
 				fprintf(gFILE, "uninitialize(): vertexdata_position.vkBuffer is freed\n");
 			}
+			
+			FreeFireSliceStorage();
+			FreeFireShapeOffsets();
 			
 			//Step_15_4. In unitialize(), free each command buffer by using vkFreeCommandBuffers()(https://registry.khronos.org/vulkan/specs/latest/man/html/vkFreeCommandBuffers.html) in a loop of size swapchainImage count.
 			for(uint32_t i =0; i < swapchainImageCount; i++)
@@ -4378,34 +5050,23 @@ VkResult CreateCommandBuffers(void)
 
 void GenerateFireSlices(void)
 {
-        fireSlicePositions.clear();
-        fireSliceLocalCoords.clear();
+        gFireSliceVertexCountCPU = 0;
         fireVertexCount = 0;
-
-        fireSlicePositions.reserve(static_cast<size_t>(fireSliceCount) * 12);
-        fireSliceLocalCoords.reserve(static_cast<size_t>(fireSliceCount) * 12);
 
         if (fireSliceCount == 0)
         {
                 return;
         }
 
-        const float widthHalf = fireRadius;
-        const float depthHalf = fireRadius;
-        const float heightHalf = fireHeight * 0.5f;
+        size_t emitterCount = GetFireEmitterCount();
+        size_t estimatedVertices = (size_t)fireSliceCount * emitterCount * 12u;
+        if (!EnsureFireSliceCapacity(estimatedVertices))
+        {
+                FileIO("GenerateFireSlices(): EnsureFireSliceCapacity() failed\n");
+                return;
+        }
 
-        const std::array<glm::vec3, 8> posCorners = {
-                glm::vec3(-widthHalf, -heightHalf, -depthHalf),
-                glm::vec3( widthHalf, -heightHalf, -depthHalf),
-                glm::vec3(-widthHalf,  heightHalf, -depthHalf),
-                glm::vec3( widthHalf,  heightHalf, -depthHalf),
-                glm::vec3(-widthHalf, -heightHalf,  depthHalf),
-                glm::vec3( widthHalf, -heightHalf,  depthHalf),
-                glm::vec3(-widthHalf,  heightHalf,  depthHalf),
-                glm::vec3( widthHalf,  heightHalf,  depthHalf)
-        };
-
-        const std::array<glm::vec3, 8> texCorners = {
+        const glm::vec3 texCorners[8] = {
                 glm::vec3(0.0f, 0.0f, 0.0f),
                 glm::vec3(1.0f, 0.0f, 0.0f),
                 glm::vec3(0.0f, 1.0f, 0.0f),
@@ -4416,270 +5077,21 @@ void GenerateFireSlices(void)
                 glm::vec3(1.0f, 1.0f, 1.0f)
         };
 
-        const glm::vec3 fireFocus = glm::vec3(0.0f, fireHeight * 0.5f, 0.0f);
-        glm::vec3 viewVector = gCameraPosition - fireFocus;
-        if (glm::length(viewVector) < 0.0001f)
+        if (gFireShapeOffsetCount == 0)
         {
-                viewVector = glm::vec3(0.0f, 0.0f, 1.0f);
+                AppendEmitterSlicesForOffset(glm::vec3(0.0f), texCorners);
         }
-        viewVector = glm::normalize(viewVector);
-
-        std::array<float, 8> cornerDistance;
-        cornerDistance[0] = glm::dot(posCorners[0], viewVector);
-        float minDistance = cornerDistance[0];
-        float maxDistance = cornerDistance[0];
-        int maxCorner = 0;
-
-        for (int i = 1; i < 8; ++i)
+        else
         {
-                cornerDistance[i] = glm::dot(posCorners[i], viewVector);
-                if (cornerDistance[i] > maxDistance)
+                float spacing = fireRadius * FIRE_SHAPE_SPACING_MULTIPLIER;
+                for (size_t i = 0; i < gFireShapeOffsetCount; ++i)
                 {
-                        maxDistance = cornerDistance[i];
-                        maxCorner = i;
-                }
-                if (cornerDistance[i] < minDistance)
-                {
-                        minDistance = cornerDistance[i];
+                        glm::vec3 emitterOffset(gFireShapeOffsets[i].x * spacing, 0.0f, gFireShapeOffsets[i].y * spacing);
+                        AppendEmitterSlicesForOffset(emitterOffset, texCorners);
                 }
         }
 
-        float distanceRange = maxDistance - minDistance;
-        if (distanceRange <= 0.0f)
-        {
-                return;
-        }
-
-        float sliceSpacing = distanceRange / static_cast<float>(fireSliceCount);
-        if (sliceSpacing <= 0.0f)
-        {
-                return;
-        }
-
-        float sliceDistance = floorf(maxDistance / sliceSpacing) * sliceSpacing;
-
-        struct ActiveEdge
-        {
-                bool expired;
-                int startIndex;
-                int endIndex;
-                glm::vec3 deltaPos;
-                glm::vec3 deltaTex;
-                glm::vec3 pos;
-                glm::vec3 tex;
-                int prev;
-                int next;
-        };
-
-        constexpr int MAX_EDGES = 12;
-        std::array<ActiveEdge, MAX_EDGES> activeEdges;
-        int nextEdgeIndex = 0;
-
-        struct EdgeExpiration
-        {
-                float priority;
-                int index;
-        };
-
-        struct EdgeCompare
-        {
-                bool operator()(const EdgeExpiration& a, const EdgeExpiration& b) const
-                {
-                        return a.priority < b.priority;
-                }
-        };
-
-        std::priority_queue<EdgeExpiration, std::vector<EdgeExpiration>, EdgeCompare> expirations;
-
-        constexpr int cornerNeighbors[8][3] = {
-                { 1, 2, 4 },
-                { 0, 5, 3 },
-                { 0, 3, 6 },
-                { 1, 7, 2 },
-                { 0, 6, 5 },
-                { 1, 4, 7 },
-                { 2, 7, 4 },
-                { 3, 5, 6 }
-        };
-
-        constexpr int incomingEdges[8][8] = {
-                { -1,  2,  4, -1,  1, -1, -1, -1 },
-                {  5, -1, -1,  0, -1,  3, -1, -1 },
-                {  3, -1, -1,  6, -1, -1,  0, -1 },
-                { -1,  7,  1, -1, -1, -1, -1,  2 },
-                {  6, -1, -1, -1, -1,  0,  5, -1 },
-                { -1,  4, -1, -1,  7, -1, -1,  1 },
-                { -1, -1,  7, -1,  2, -1, -1,  4 },
-                { -1, -1, -1,  5, -1,  6,  3, -1 }
-        };
-
-        auto createEdge = [&](int startIndex, int endIndex) -> int
-        {
-                if (endIndex < 0 || nextEdgeIndex >= MAX_EDGES)
-                {
-                        return -1;
-                }
-
-                ActiveEdge& activeEdge = activeEdges[nextEdgeIndex];
-                activeEdge.expired = false;
-                activeEdge.startIndex = startIndex;
-                activeEdge.endIndex = endIndex;
-                activeEdge.prev = -1;
-                activeEdge.next = -1;
-                activeEdge.deltaPos = glm::vec3(0.0f);
-                activeEdge.deltaTex = glm::vec3(0.0f);
-                activeEdge.pos = posCorners[startIndex];
-                activeEdge.tex = texCorners[startIndex];
-
-                float range = cornerDistance[startIndex] - cornerDistance[endIndex];
-                if (fabsf(range) > 1.0e-6f)
-                {
-                        float invRange = 1.0f / range;
-                        activeEdge.deltaPos = (posCorners[endIndex] - posCorners[startIndex]) * invRange;
-                        activeEdge.deltaTex = (texCorners[endIndex] - texCorners[startIndex]) * invRange;
-                        float step = cornerDistance[startIndex] - sliceDistance;
-                        activeEdge.pos = posCorners[startIndex] + activeEdge.deltaPos * step;
-                        activeEdge.tex = texCorners[startIndex] + activeEdge.deltaTex * step;
-                        activeEdge.deltaPos *= sliceSpacing;
-                        activeEdge.deltaTex *= sliceSpacing;
-                }
-
-                int createdIndex = nextEdgeIndex;
-                ++nextEdgeIndex;
-
-                expirations.push({ cornerDistance[endIndex], createdIndex });
-                return createdIndex;
-        };
-
-        for (int i = 0; i < 3; ++i)
-        {
-                int edgeIndex = createEdge(maxCorner, cornerNeighbors[maxCorner][i]);
-                if (edgeIndex >= 0)
-                {
-                        activeEdges[edgeIndex].prev = (i + 2) % 3;
-                        activeEdges[edgeIndex].next = (i + 1) % 3;
-                }
-        }
-
-        int firstEdge = 0;
-
-        fireSlicePositions.reserve(static_cast<size_t>(fireSliceCount) * 12);
-        fireSliceLocalCoords.reserve(static_cast<size_t>(fireSliceCount) * 12);
-
-        while (sliceDistance > minDistance)
-        {
-                while (!expirations.empty() && expirations.top().priority >= sliceDistance)
-                {
-                        EdgeExpiration top = expirations.top();
-                        expirations.pop();
-
-                        if (top.index < 0 || top.index >= nextEdgeIndex)
-                        {
-                                continue;
-                        }
-
-                        ActiveEdge& edge = activeEdges[top.index];
-                        if (edge.expired)
-                        {
-                                continue;
-                        }
-
-                        ActiveEdge& prevEdge = activeEdges[edge.prev];
-                        ActiveEdge& nextEdgeRef = activeEdges[edge.next];
-
-                        if (edge.endIndex != prevEdge.endIndex && edge.endIndex != nextEdgeRef.endIndex)
-                        {
-                                edge.expired = true;
-
-                                int edge1 = createEdge(edge.endIndex, incomingEdges[edge.endIndex][edge.startIndex]);
-                                if (edge1 < 0)
-                                {
-                                        continue;
-                                }
-                                activeEdges[edge1].prev = edge.prev;
-                                activeEdges[edge.prev].next = edge1;
-
-                                int edge2 = createEdge(edge.endIndex, incomingEdges[edge.endIndex][activeEdges[edge1].endIndex]);
-                                if (edge2 < 0)
-                                {
-                                        continue;
-                                }
-                                activeEdges[edge1].next = edge2;
-                                activeEdges[edge2].prev = edge1;
-                                activeEdges[edge2].next = edge.next;
-                                activeEdges[edge.next].prev = edge2;
-                                firstEdge = edge1;
-                        }
-                        else
-                        {
-                                ActiveEdge* prevPtr = nullptr;
-                                ActiveEdge* nextPtr = nullptr;
-
-                                if (edge.endIndex == prevEdge.endIndex)
-                                {
-                                        prevPtr = &prevEdge;
-                                        nextPtr = &edge;
-                                }
-                                else
-                                {
-                                        prevPtr = &edge;
-                                        nextPtr = &nextEdgeRef;
-                                }
-
-                                prevPtr->expired = true;
-                                nextPtr->expired = true;
-
-                                int merged = createEdge(edge.endIndex, incomingEdges[edge.endIndex][prevPtr->startIndex]);
-                                if (merged < 0)
-                                {
-                                        continue;
-                                }
-
-                                activeEdges[merged].prev = prevPtr->prev;
-                                activeEdges[prevPtr->prev].next = merged;
-                                activeEdges[merged].next = nextPtr->next;
-                                activeEdges[nextPtr->next].prev = merged;
-                                firstEdge = merged;
-                        }
-                }
-
-                std::vector<glm::vec3> polygonPositions;
-                std::vector<glm::vec3> polygonTexCoords;
-                polygonPositions.reserve(6);
-                polygonTexCoords.reserve(6);
-
-                int current = firstEdge;
-                int count = 0;
-
-                do
-                {
-                        ActiveEdge& activeEdge = activeEdges[current];
-                        polygonPositions.push_back(activeEdge.pos);
-                        polygonTexCoords.push_back(activeEdge.tex);
-                        activeEdge.pos += activeEdge.deltaPos;
-                        activeEdge.tex += activeEdge.deltaTex;
-                        current = activeEdge.next;
-                        ++count;
-                } while (current != firstEdge && count < MAX_EDGES);
-
-                if (count >= 3)
-                {
-                        for (int i = 2; i < count; ++i)
-                        {
-                                fireSlicePositions.push_back(polygonPositions[0]);
-                                fireSlicePositions.push_back(polygonPositions[i - 1]);
-                                fireSlicePositions.push_back(polygonPositions[i]);
-
-                                fireSliceLocalCoords.push_back(polygonTexCoords[0]);
-                                fireSliceLocalCoords.push_back(polygonTexCoords[i - 1]);
-                                fireSliceLocalCoords.push_back(polygonTexCoords[i]);
-                        }
-                }
-
-                sliceDistance -= sliceSpacing;
-        }
-
-        fireVertexCount = static_cast<uint32_t>(fireSlicePositions.size());
+        fireVertexCount = static_cast<uint32_t>(gFireSliceVertexCountCPU);
 }
 
 VkResult UpdateFireGeometry(void)
@@ -4699,7 +5111,12 @@ VkResult UpdateFireGeometry(void)
                 fprintf(gFILE, "UpdateFireGeometry(): vkMapMemory() failed for vertex positions with error code %d\n", vkResult);
                 return vkResult;
         }
-        memcpy(data, fireSlicePositions.data(), positionBufferSize);
+        if (gFireSlicePositions == NULL)
+        {
+                vkUnmapMemory(vkDevice, vertexdata_position.vkDeviceMemory);
+                return VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+        memcpy(data, gFireSlicePositions, positionBufferSize);
         vkUnmapMemory(vkDevice, vertexdata_position.vkDeviceMemory);
 
         VkDeviceSize localBufferSize = sizeof(glm::vec3) * fireVertexCount;
@@ -4709,7 +5126,12 @@ VkResult UpdateFireGeometry(void)
                 fprintf(gFILE, "UpdateFireGeometry(): vkMapMemory() failed for local coordinates with error code %d\n", vkResult);
                 return vkResult;
         }
-        memcpy(data, fireSliceLocalCoords.data(), localBufferSize);
+        if (gFireSliceLocalCoords == NULL)
+        {
+                vkUnmapMemory(vkDevice, vertexdata_texcoord.vkDeviceMemory);
+                return VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+        memcpy(data, gFireSliceLocalCoords, localBufferSize);
         vkUnmapMemory(vkDevice, vertexdata_texcoord.vkDeviceMemory);
 
         return VK_SUCCESS;
@@ -4719,6 +5141,7 @@ void DestroyFireVertexBuffers(void)
 {
         if (vkDevice == VK_NULL_HANDLE)
         {
+                FreeFireSliceStorage();
                 fireSliceCapacity = 0;
                 recordedFireVertexCount = 0;
                 return;
@@ -4752,6 +5175,7 @@ void DestroyFireVertexBuffers(void)
                 FileIO("DestroyFireVertexBuffers(): Destroyed position buffer\n");
         }
 
+        FreeFireSliceStorage();
         fireSliceCapacity = 0;
         recordedFireVertexCount = 0;
 }
@@ -4812,16 +5236,19 @@ VkResult CreateVertexBuffer(void)
         /*
         22.3. Initialize storage for fire slices that will be populated by the spline-driven generator.
         */
-        uint32_t vertexCount = fireSliceCount * 12;
+        size_t emitterCount = GetFireEmitterCount();
+        uint32_t vertexCount = static_cast<uint32_t>(fireSliceCount * static_cast<uint32_t>(emitterCount) * 12u);
         if(vertexCount == 0)
         {
                 fprintf(gFILE, "CreateVertexBuffer(): fireSliceCount is zero\n");
                 return VK_ERROR_INITIALIZATION_FAILED;
         }
-        fireSlicePositions.clear();
-        fireSliceLocalCoords.clear();
-        fireSlicePositions.reserve(vertexCount);
-        fireSliceLocalCoords.reserve(vertexCount);
+        gFireSliceVertexCountCPU = 0;
+        if (!EnsureFireSliceCapacity((size_t)vertexCount))
+        {
+                FileIO("CreateVertexBuffer(): EnsureFireSliceCapacity() failed\n");
+                return VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
 	
 	/*
 	22.4. memset our global vertexData_position.

@@ -1145,10 +1145,10 @@ VkResult CreateTextureResource(const char*, TextureResource*, const char*);
 		fprintf(gFILE, "initialize(): CreateVertexBuffer() succedded\n");
 	}
 	
-        vkResult  = CreateTextureResource("firetex.png", &fireTexture, "fire profile");
+        vkResult  = CreateTextureResource("firetex.jpeg", &fireTexture, "fire profile");
         if (vkResult != VK_SUCCESS)
         {
-                fprintf(gFILE, "initialize(): CreateTextureResource() function failed for firetex.png with error code %d\n", vkResult);
+                fprintf(gFILE, "initialize(): CreateTextureResource() function failed for firetex.jpeg with error code %d\n", vkResult);
                 return vkResult;
         }
         else

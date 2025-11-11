@@ -379,7 +379,7 @@ const float FIRE_TURBULENCE_STEP = 0.1f;
 const float FIRE_DEFAULT_TIME_SPEED = 1.2f;
 const float FIRE_TIME_SPEED_MIN = 0.0f;
 const float FIRE_TIME_SPEED_MAX = 5.0f;
-const float FIRE_TIME_SPEED_STEP = 0.1f;
+const float FIRE_TIME_SPEED_STEP = 0.02f;
 const float FIRE_BASE_DELTA_TIME = 0.016f;
 const float FIRE_TIME_WRAP = 1000.0f;
 

@@ -74,4 +74,4 @@
 
 If you want, I can turn this into a short Vulkan task list (buffers, blend state, shader pseudocode, and parameters to expose) tailored to your ARTR project. 
 
-Note : Use firetex.jpeg as fire profile texture and check how can you use nzw.png.
+Note : Use firetex.png as fire profile texture and check how can you use nzw.png.

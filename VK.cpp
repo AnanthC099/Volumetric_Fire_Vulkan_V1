@@ -344,39 +344,39 @@ For Rotation
 float angle = 0.0f;
 
 //Fire system related variables
-const uint32_t FIRE_DEFAULT_SLICE_COUNT = 96;
+const uint32_t FIRE_DEFAULT_SLICE_COUNT = 160;
 const uint32_t FIRE_SLICE_COUNT_MIN = 8;
 const uint32_t FIRE_SLICE_COUNT_MAX = 256;
 const uint32_t FIRE_SLICE_COUNT_STEP = 8;
 
-const float FIRE_DEFAULT_RADIUS = 0.5f;
+const float FIRE_DEFAULT_RADIUS = 0.75f;
 const float FIRE_RADIUS_MIN = 0.1f;
 const float FIRE_RADIUS_MAX = 3.0f;
 const float FIRE_RADIUS_STEP = 0.05f;
 
-const float FIRE_DEFAULT_HEIGHT = 2.0f;
+const float FIRE_DEFAULT_HEIGHT = 3.0f;
 const float FIRE_HEIGHT_MIN = 0.5f;
 const float FIRE_HEIGHT_MAX = 5.0f;
 const float FIRE_HEIGHT_STEP = 0.1f;
 
-const float FIRE_DEFAULT_SCALE_X = 1.0f;
-const float FIRE_DEFAULT_SCALE_Y = 2.0f;
-const float FIRE_DEFAULT_SCALE_Z = 1.0f;
+const float FIRE_DEFAULT_SCALE_X = 1.25f;
+const float FIRE_DEFAULT_SCALE_Y = 2.75f;
+const float FIRE_DEFAULT_SCALE_Z = 1.25f;
 const float FIRE_SCALE_MIN = 0.1f;
 const float FIRE_SCALE_MAX = 5.0f;
 const float FIRE_SCALE_STEP = 0.1f;
 
-const float FIRE_DEFAULT_SCROLL_SPEED = 0.5f;
+const float FIRE_DEFAULT_SCROLL_SPEED = 0.85f;
 const float FIRE_SCROLL_MIN = 0.0f;
 const float FIRE_SCROLL_MAX = 3.0f;
 const float FIRE_SCROLL_STEP = 0.05f;
 
-const float FIRE_DEFAULT_TURBULENCE = 1.3f;
+const float FIRE_DEFAULT_TURBULENCE = 2.0f;
 const float FIRE_TURBULENCE_MIN = 0.0f;
 const float FIRE_TURBULENCE_MAX = 3.0f;
 const float FIRE_TURBULENCE_STEP = 0.1f;
 
-const float FIRE_DEFAULT_TIME_SPEED = 1.0f;
+const float FIRE_DEFAULT_TIME_SPEED = 1.2f;
 const float FIRE_TIME_SPEED_MIN = 0.0f;
 const float FIRE_TIME_SPEED_MAX = 5.0f;
 const float FIRE_TIME_SPEED_STEP = 0.1f;
@@ -415,6 +415,23 @@ void FileIO(const char* format, ...)
                 va_end(args);
                 fclose(file);
         }
+}
+
+static void LogFireParameters(const char* context)
+{
+        const char* label = (context != NULL) ? context : "FireParameters";
+
+        FileIO("%s: slices=%u radius=%.2f height=%.2f scale=(%.2f, %.2f, %.2f) scroll=%.2f turbulence=%.2f timeSpeed=%.2f\n",
+                label,
+                fireSliceCount,
+                fireRadius,
+                fireHeight,
+                fireScaleX,
+                fireScaleY,
+                fireScaleZ,
+                fireScrollSpeed,
+                fireTurbulence,
+                fireTimeSpeed);
 }
 
 static float ClampFloat(float value, float minValue, float maxValue)
@@ -487,16 +504,7 @@ void ResetFireParameters(void)
         fireTimeSpeed = FIRE_DEFAULT_TIME_SPEED;
         fireTime = 0.0f;
 
-        FileIO("ResetFireParameters(): slices=%u radius=%.2f height=%.2f scale=(%.2f, %.2f, %.2f) scroll=%.2f turbulence=%.2f timeSpeed=%.2f\n",
-                fireSliceCount,
-                fireRadius,
-                fireHeight,
-                fireScaleX,
-                fireScaleY,
-                fireScaleZ,
-                fireScrollSpeed,
-                fireTurbulence,
-                fireTimeSpeed);
+        LogFireParameters("ResetFireParameters()");
 
         recordedFireVertexCount = 0;
 
@@ -1322,11 +1330,13 @@ VkResult CreateTextureResource(const char*, TextureResource*, const char*);
 	/*
 	Initialization is completed here..........................
 	*/
-	bInitialized = TRUE;
-	
-	fprintf(gFILE, "initialize(): initialize() completed sucessfully");
-	
-	return vkResult;
+        bInitialized = TRUE;
+
+        LogFireParameters("initialize(): fire parameters");
+
+        fprintf(gFILE, "initialize(): initialize() completed sucessfully");
+
+        return vkResult;
 }
 
 VkResult resize(int width, int height)

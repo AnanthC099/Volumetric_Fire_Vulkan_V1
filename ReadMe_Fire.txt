@@ -79,4 +79,4 @@ Note : Use firetex.png as fire profile texture and check how can you use nzw.png
 
 What about Fire of diffrent shapes like Swastika ?
 Read contents  Shape.PNG for steps to do  and there choose Step 1
-Image to be used is Swastika_Transparent.png
+Image to be used is Swastika_Transparent.png (Please check if this image can be used or need to be edited)

@@ -75,3 +75,8 @@
 If you want, I can turn this into a short Vulkan task list (buffers, blend state, shader pseudocode, and parameters to expose) tailored to your ARTR project. 
 
 Note : Use firetex.png as fire profile texture and check how can you use nzw.png.
+
+
+What about Fire of diffrent shapes like Swastika ?
+Read contents  Shape.PNG for steps to do  and there choose Step 1
+Image to be used is Swastika_Transparent.png
